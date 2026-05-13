@@ -35,7 +35,7 @@
 /android/local.properties
 /android/**/GeneratedPluginRegistrant.java
 /android/**/local.properties
-/android/**/gradle.properties
+
 /android/**/*.iml
 /android/**/*.keystore
 /android/**/build/
