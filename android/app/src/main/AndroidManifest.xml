@@ -46,5 +46,10 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Auto-download ML Kit model from Play Store -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="subject_segment" />
     </application>
 </manifest>
