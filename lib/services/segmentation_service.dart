@@ -1,15 +1,22 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 import 'package:google_mlkit_subject_segmentation/google_mlkit_subject_segmentation.dart';
 import 'package:image/image.dart' as img;
 
 class SegmentationService {
-  final Segmenter _segmenter;
+  final SubjectSegmenter _segmenter;
 
   SegmentationService()
-      : _segmenter = Segmenter(
-          mode: SegmentationMode.stream,
-          isStream: false,
+      : _segmenter = SubjectSegmenter(
+          options: SubjectSegmenterOptions(
+            enableForegroundConfidenceMask: true,
+            enableForegroundBitmap: true,
+            enableMultipleSubjects: SubjectResultOptions(
+              enableConfidenceMask: false,
+              enableSubjectBitmap: false,
+            ),
+          ),
         );
 
   Future<Uint8List?> segmentCarImage(File imageFile) async {
@@ -18,31 +25,33 @@ class SegmentationService {
       final inputImage = InputImage.fromFile(imageFile);
 
       // Process segmentation
-      final segmentedImage = await _segmenter.processImage(inputImage);
-      if (segmentedImage == null) return null;
+      final result = await _segmenter.processImage(inputImage);
+      if (result == null) return null;
 
-      // Get mask
-      final mask = segmentedImage.getMask();
+      // Get mask data (confidence mask values)
+      final confidenceMask = result.foregroundConfidenceMask;
+      if (confidenceMask == null) return null;
 
-      // Load original image
+      // Get original image dimensions
       final originalBytes = await imageFile.readAsBytes();
       final original = img.decodeImage(originalBytes);
       if (original == null) return null;
 
-      // Resize original to mask dimensions for pixel-perfect mapping
-      final resized = img.copyResize(original, width: mask.width, height: mask.height);
-      final maskData = mask.getData();
+      // Mask dimensions match original image size (from InputImage metadata)
+      final maskWidth = inputImage.metadata?.size.width.toInt() ?? original.width;
+      final maskHeight = inputImage.metadata?.size.height.toInt() ?? original.height;
 
-      // Create output image with transparency
+      // Resize original to mask dimensions for pixel-perfect mapping
+      final resized = img.copyResize(original, width: maskWidth, height: maskHeight);
       final output = img.Image.from(resized);
 
-      // Apply mask: set alpha to 0 where mask value < threshold
-      const threshold = 128;
+      // Apply mask: set alpha to 0 where confidence < threshold (0.5)
+      const threshold = 0.5;
       for (var y = 0; y < output.height; y++) {
         for (var x = 0; x < output.width; x++) {
-          final maskIndex = y * mask.width + x;
-          final maskValue = maskData[maskIndex];
-          if (maskValue < threshold) {
+          final maskIndex = y * maskWidth + x;
+          final confidence = confidenceMask[maskIndex];
+          if (confidence < threshold) {
             output.setPixelRgba(x, y, 0, 0, 0, 0); // Fully transparent
           }
         }
