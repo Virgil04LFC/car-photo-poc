@@ -563,12 +563,16 @@ class ResultScreen extends StatefulWidget {
   final File originalFile;
   final Uint8List resultBytes;
   final bool fromCamera;
+  final int totalMs;    // phone-side total (read + resize + upload + download)
+  final int backendMs;  // server-side total (resize + Photoroom)
 
   const ResultScreen({
     super.key,
     required this.originalFile,
     required this.resultBytes,
     required this.fromCamera,
+    this.totalMs = 0,
+    this.backendMs = 0,
   });
 
   @override
