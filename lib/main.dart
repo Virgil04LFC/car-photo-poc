@@ -11,6 +11,8 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'batch.dart';
+import 'batch_screen.dart';
 import 'config.dart';
 
 // ─── Perf timing ──────────────────────────────────────────────────────────────
@@ -76,6 +78,25 @@ class _CameraScreenState extends State<CameraScreen> {
   String? _errorMessage;
   String _selectedBackgroundId = kDefaultBackgroundId;
   final ImagePicker _imagePicker = ImagePicker();
+
+  // ── Batch input ───────────────────────────────────────────────────────────
+
+  Future<void> _pickBatch() async {
+    final picked = await _imagePicker.pickMultiImage(imageQuality: 100);
+    if (picked.isEmpty || !mounted) return;
+
+    final files = picked.map((x) => File(x.path)).toList();
+    final controller = BatchController(
+      files: files,
+      backgroundId: _selectedBackgroundId,
+    );
+
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => BatchScreen(controller: controller)),
+    );
+
+    controller.dispose();
+  }
 
   // Retry support — remember last input so error screen can re-process
   File? _lastFile;
@@ -340,18 +361,35 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          // Camera + Gallery buttons
+          // Camera + Gallery + Batch buttons
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              FloatingActionButton.extended(
-                heroTag: 'gallery',
-                onPressed: _pickFromGallery,
-                icon: const Icon(Icons.photo_library),
-                label: const Text('Gallery'),
-                backgroundColor: Colors.white12,
-                foregroundColor: Colors.white,
+              // Left: single gallery + batch stacked
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  FloatingActionButton.extended(
+                    heroTag: 'batch',
+                    onPressed: _pickBatch,
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Batch'),
+                    backgroundColor: Colors.white12,
+                    foregroundColor: Colors.white,
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton.extended(
+                    heroTag: 'gallery',
+                    onPressed: _pickFromGallery,
+                    icon: const Icon(Icons.photo_library),
+                    label: const Text('Single'),
+                    backgroundColor: Colors.white12,
+                    foregroundColor: Colors.white,
+                  ),
+                ],
               ),
+              // Right: camera
               FloatingActionButton.large(
                 heroTag: 'camera',
                 onPressed: _capture,
