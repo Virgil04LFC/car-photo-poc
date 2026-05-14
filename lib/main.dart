@@ -597,7 +597,7 @@ class _BgCard extends StatelessWidget {
                 right: 0,
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 4),
-                  color: Colors.black60,
+                  color: Colors.black54,
                   child: Text(
                     label,
                     textAlign: TextAlign.center,
