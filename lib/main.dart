@@ -2,10 +2,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import 'services/compositor_service.dart';
 import 'services/segmentation_service.dart';
 
 Future<void> main() async {
@@ -66,7 +69,7 @@ class _CameraScreenState extends State<CameraScreen> {
       );
       _cameraController = CameraController(
         backCamera,
-        ResolutionPreset.high, // Higher res for edge quality assessment
+        ResolutionPreset.high,
         enableAudio: false,
       );
       await _cameraController!.initialize();
@@ -171,11 +174,9 @@ class _CameraScreenState extends State<CameraScreen> {
             children: [
               const Icon(Icons.error_outline, color: Colors.red, size: 48),
               const SizedBox(height: 16),
-              Text(
-                _errorMessage!,
-                style: const TextStyle(color: Colors.red),
-                textAlign: TextAlign.center,
-              ),
+              Text(_errorMessage!,
+                  style: const TextStyle(color: Colors.red),
+                  textAlign: TextAlign.center),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: () => setState(() => _errorMessage = null),
@@ -201,10 +202,8 @@ class _CameraScreenState extends State<CameraScreen> {
                 children: [
                   CircularProgressIndicator(color: Colors.white),
                   SizedBox(height: 16),
-                  Text(
-                    'Segmenting…',
-                    style: TextStyle(color: Colors.white, fontSize: 18),
-                  ),
+                  Text('Segmenting…',
+                      style: TextStyle(color: Colors.white, fontSize: 18)),
                 ],
               ),
             ),
@@ -215,6 +214,8 @@ class _CameraScreenState extends State<CameraScreen> {
 }
 
 // ─── Result Screen ───────────────────────────────────────────────────────────
+
+enum _ViewMode { original, cutout, composite }
 
 class ResultScreen extends StatefulWidget {
   final File originalFile;
@@ -231,26 +232,164 @@ class ResultScreen extends StatefulWidget {
 }
 
 class _ResultScreenState extends State<ResultScreen> {
-  bool _showSegmented = true;
-  final TransformationController _transformController = TransformationController();
+  _ViewMode _mode = _ViewMode.composite;
+  ShowroomBackground _selectedBg = ShowroomBackground.light;
 
-  void _resetZoom() => _transformController.value = Matrix4.identity();
+  Uint8List? _compositeBytes;
+  bool _compositing = false;
+  bool _saving = false;
+
+  final TransformationController _xController = TransformationController();
+
+  // Small preview thumbnails for the background picker — generated once.
+  late final Map<ShowroomBackground, Uint8List> _thumbs;
+
+  @override
+  void initState() {
+    super.initState();
+    _thumbs = {
+      for (final bg in ShowroomBackground.values)
+        bg: CompositorService.thumbnail(bg),
+    };
+    _buildComposite();
+  }
 
   @override
   void dispose() {
-    _transformController.dispose();
+    _xController.dispose();
     super.dispose();
+  }
+
+  // ── Compositing ─────────────────────────────────────────────────────────────
+
+  Future<void> _buildComposite() async {
+    setState(() {
+      _compositing = true;
+      _compositeBytes = null;
+    });
+    try {
+      final bytes = await compute(
+        runComposite,
+        CompositeArgs(widget.segmentedBytes, _selectedBg),
+      );
+      if (mounted) setState(() => _compositeBytes = bytes);
+    } catch (e) {
+      if (mounted) _snack('Composite failed: $e');
+    } finally {
+      if (mounted) setState(() => _compositing = false);
+    }
+  }
+
+  Future<void> _switchBackground(ShowroomBackground bg) async {
+    if (bg == _selectedBg && _compositeBytes != null) return;
+    _resetZoom();
+    setState(() => _selectedBg = bg);
+    await _buildComposite();
+  }
+
+  // ── Save ─────────────────────────────────────────────────────────────────────
+
+  Future<void> _saveToGallery() async {
+    if (_compositeBytes == null) return;
+    setState(() => _saving = true);
+    try {
+      final name = 'car_${DateTime.now().millisecondsSinceEpoch}.png';
+      await Gal.putImageBytes(_compositeBytes!, name: name);
+      if (mounted) _snack('Saved to gallery ✓');
+    } catch (e) {
+      if (mounted) _snack('Save failed: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  void _resetZoom() => _xController.value = Matrix4.identity();
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────────
+
+  String get _title => switch (_mode) {
+        _ViewMode.original => 'Original',
+        _ViewMode.cutout => 'Cutout',
+        _ViewMode.composite => 'Composite',
+      };
+
+  Widget get _activeImage {
+    switch (_mode) {
+      case _ViewMode.original:
+        return Image.file(widget.originalFile, fit: BoxFit.contain);
+      case _ViewMode.cutout:
+        return _CheckeredBackground(
+          child: Image.memory(
+            widget.segmentedBytes,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+          ),
+        );
+      case _ViewMode.composite:
+        if (_compositing) {
+          return const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 12),
+                Text('Building composite…',
+                    style: TextStyle(color: Colors.white54)),
+              ],
+            ),
+          );
+        }
+        if (_compositeBytes == null) {
+          return const Center(
+            child: Text('No composite',
+                style: TextStyle(color: Colors.white38)),
+          );
+        }
+        return Image.memory(
+          _compositeBytes!,
+          fit: BoxFit.contain,
+          gaplessPlayback: true,
+        );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final canSave =
+        _mode == _ViewMode.composite && _compositeBytes != null && !_compositing;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: Text(_showSegmented ? 'Segmented Result' : 'Original Photo'),
+        title: Text(_title),
         centerTitle: true,
         actions: [
+          // Save button — only when composite is ready
+          if (canSave)
+            _saving
+                ? const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                : IconButton(
+                    icon: const Icon(Icons.save_alt),
+                    tooltip: 'Save to gallery',
+                    onPressed: _saveToGallery,
+                  ),
+          // Reset zoom
           IconButton(
             icon: const Icon(Icons.fit_screen),
             tooltip: 'Reset zoom',
@@ -260,89 +399,102 @@ class _ResultScreenState extends State<ResultScreen> {
       ),
       body: Column(
         children: [
-          // ── Full-screen zoomable image ──
+          // ── Full-screen zoomable image ──────────────────────────────────
           Expanded(
             child: GestureDetector(
               onDoubleTap: _resetZoom,
               child: InteractiveViewer(
-                transformationController: _transformController,
+                transformationController: _xController,
                 minScale: 0.5,
                 maxScale: 8.0,
-                child: Center(
-                  child: _showSegmented
-                      ? _CheckeredBackground(
-                          child: Image.memory(
-                            widget.segmentedBytes,
-                            fit: BoxFit.contain,
-                            gaplessPlayback: true,
-                          ),
-                        )
-                      : Image.file(
-                          widget.originalFile,
-                          fit: BoxFit.contain,
-                        ),
-                ),
+                child: Center(child: _activeImage),
               ),
             ),
           ),
 
-          // ── Hint text ──
+          // ── Hint ────────────────────────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
             child: Text(
               'Pinch to zoom · Double-tap to reset',
-              style: TextStyle(color: Colors.white38, fontSize: 12),
+              style: TextStyle(color: Colors.white30, fontSize: 11),
             ),
           ),
 
-          // ── Toggle bar ──
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 8, 24, 12),
-              child: Row(
-                children: [
+          // ── 3-way mode toggle ───────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: Row(
+              children: [
+                for (final mode in _ViewMode.values) ...[
+                  if (mode.index > 0) const SizedBox(width: 8),
                   Expanded(
-                    child: _ToggleButton(
-                      label: 'Original',
-                      icon: Icons.photo_camera,
-                      selected: !_showSegmented,
-                      onTap: () {
-                        _resetZoom();
-                        setState(() => _showSegmented = false);
+                    child: _ModeButton(
+                      label: switch (mode) {
+                        _ViewMode.original => 'Original',
+                        _ViewMode.cutout => 'Cutout',
+                        _ViewMode.composite => 'Composite',
                       },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _ToggleButton(
-                      label: 'Segmented',
-                      icon: Icons.auto_fix_high,
-                      selected: _showSegmented,
+                      icon: switch (mode) {
+                        _ViewMode.original => Icons.photo_camera,
+                        _ViewMode.cutout => Icons.auto_fix_high,
+                        _ViewMode.composite => Icons.layers,
+                      },
+                      selected: _mode == mode,
                       onTap: () {
                         _resetZoom();
-                        setState(() => _showSegmented = true);
+                        setState(() => _mode = mode);
                       },
                     ),
                   ),
                 ],
-              ),
+              ],
             ),
           ),
+
+          // ── Background picker (composite mode only) ─────────────────────
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeInOut,
+            child: _mode == _ViewMode.composite
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                    child: Row(
+                      children: [
+                        for (final bg in ShowroomBackground.values) ...[
+                          if (bg.index > 0) const SizedBox(width: 10),
+                          Expanded(
+                            child: _BgCard(
+                              label: CompositorService.labels[bg]!,
+                              thumbnail: _thumbs[bg]!,
+                              selected: _selectedBg == bg,
+                              onTap: () => _switchBackground(bg),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+
+          // Safe area bottom
+          SizedBox(height: 12 + MediaQuery.of(context).padding.bottom),
         ],
       ),
     );
   }
 }
 
-// ─── Toggle Button ───────────────────────────────────────────────────────────
+// ─── Mode Toggle Button ───────────────────────────────────────────────────────
 
-class _ToggleButton extends StatelessWidget {
+class _ModeButton extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool selected;
   final VoidCallback onTap;
 
-  const _ToggleButton({
+  const _ModeButton({
     required this.label,
     required this.icon,
     required this.selected,
@@ -356,23 +508,25 @@ class _ToggleButton extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(vertical: 13),
+        padding: const EdgeInsets.symmetric(vertical: 10),
         decoration: BoxDecoration(
-          color: selected ? Colors.blue.withOpacity(0.15) : Colors.white.withOpacity(0.05),
+          color: selected
+              ? Colors.blue.withOpacity(0.15)
+              : Colors.white.withOpacity(0.05),
           border: Border.all(color: color, width: selected ? 2 : 1),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 20),
-            const SizedBox(width: 8),
+            Icon(icon, color: color, size: 18),
+            const SizedBox(height: 3),
             Text(
               label,
               style: TextStyle(
                 color: color,
+                fontSize: 12,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                fontSize: 15,
               ),
             ),
           ],
@@ -382,8 +536,88 @@ class _ToggleButton extends StatelessWidget {
   }
 }
 
-// ─── Checkerboard Background ─────────────────────────────────────────────────
-// Shows transparent areas clearly instead of rendering them black.
+// ─── Background Picker Card ───────────────────────────────────────────────────
+
+class _BgCard extends StatelessWidget {
+  final String label;
+  final Uint8List thumbnail;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _BgCard({
+    required this.label,
+    required this.thumbnail,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: selected ? Colors.blue : Colors.white24,
+            width: selected ? 2.5 : 1,
+          ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(6),
+          child: Stack(
+            children: [
+              // Background thumbnail
+              Image.memory(
+                thumbnail,
+                width: double.infinity,
+                height: 64,
+                fit: BoxFit.cover,
+              ),
+              // Selected tick
+              if (selected)
+                Positioned(
+                  top: 5,
+                  right: 5,
+                  child: Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      color: Colors.blue,
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(Icons.check, color: Colors.white, size: 12),
+                  ),
+                ),
+              // Label
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  color: Colors.black60,
+                  child: Text(
+                    label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Checkerboard Background (cutout view) ────────────────────────────────────
 
 class _CheckeredBackground extends StatelessWidget {
   final Widget child;
@@ -391,32 +625,29 @@ class _CheckeredBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _CheckerPainter(),
-      child: child,
-    );
+    return CustomPaint(painter: _CheckerPainter(), child: child);
   }
 }
 
 class _CheckerPainter extends CustomPainter {
-  static const _cellSize = 16.0;
+  static const _cell = 16.0;
   static const _light = Color(0xFFAAAAAA);
   static const _dark = Color(0xFF777777);
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint();
-    for (var row = 0; row * _cellSize < size.height; row++) {
-      for (var col = 0; col * _cellSize < size.width; col++) {
-        paint.color = (row + col).isEven ? _light : _dark;
+    final p = Paint();
+    for (var row = 0; row * _cell < size.height; row++) {
+      for (var col = 0; col * _cell < size.width; col++) {
+        p.color = (row + col).isEven ? _light : _dark;
         canvas.drawRect(
-          Rect.fromLTWH(col * _cellSize, row * _cellSize, _cellSize, _cellSize),
-          paint,
+          Rect.fromLTWH(col * _cell, row * _cell, _cell, _cell),
+          p,
         );
       }
     }
   }
 
   @override
-  bool shouldRepaint(_CheckerPainter old) => false;
+  bool shouldRepaint(_CheckerPainter _) => false;
 }
