@@ -24,6 +24,7 @@ dependencies:
 
   # Gallery save
   gal: ^2.3.0
+  path_provider: ^2.1.0
 
   # Permissions
   permission_handler: ^11.2.0

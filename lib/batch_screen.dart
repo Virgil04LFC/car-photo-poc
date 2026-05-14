@@ -6,10 +6,12 @@
 ///   3. [_Phase.saving]     — spinner while writing to gallery
 ///   4. [_Phase.saved]      — confirmation + "Back to Camera"
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'batch.dart';
 
@@ -62,13 +64,18 @@ class _BatchScreenState extends State<BatchScreen> {
       _savedCount = 0;
     });
 
+    final tmpDir = await getTemporaryDirectory();
     try {
       for (final item in _ctrl.items) {
         if (!item.selectedForSave || item.resultBytes == null) continue;
+        // Write to temp file then hand to Gal — more reliable for named albums on Android
         final name = 'car_${(item.index + 1).toString().padLeft(3, '0')}_result.png';
-        await Gal.putImageBytes(item.resultBytes!, album: 'Car Photo', name: name);
+        final tmpFile = File('${tmpDir.path}/$name');
+        await tmpFile.writeAsBytes(item.resultBytes!);
+        await Gal.putImage(tmpFile.path, album: 'Car Photo');
+        await tmpFile.delete();
         _savedCount++;
-        item.resultBytes = null; // free memory after saving
+        item.resultBytes = null; // free memory
       }
     } catch (e) {
       if (mounted) {
