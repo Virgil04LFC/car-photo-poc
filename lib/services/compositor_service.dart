@@ -21,12 +21,40 @@ class CompositorService {
 
   /// Alpha-composite the segmented car PNG over a generated showroom backdrop.
   /// Runs synchronously — call via compute() to avoid blocking the UI.
+  ///
+  /// Uses manual per-pixel blending instead of img.compositeImage because
+  /// compositeImage silently breaks when src (RGBA) and dst (RGB) channel
+  /// counts differ, producing a black output.
   static Uint8List composite(Uint8List segmentedPng, ShowroomBackground bg) {
     final car = img.decodePng(segmentedPng)!;
-    final backdrop = _generate(bg, car.width, car.height);
-    // compositeImage alpha-blends car (src) over backdrop (dst) in place.
-    img.compositeImage(backdrop, car);
-    return Uint8List.fromList(img.encodePng(backdrop));
+    final result = _generate(bg, car.width, car.height);
+
+    for (var y = 0; y < car.height; y++) {
+      for (var x = 0; x < car.width; x++) {
+        final src = car.getPixel(x, y);
+        final a = src.a.toDouble() / 255.0;
+        if (a <= 0.0) continue; // fully transparent — keep backdrop pixel
+        if (a >= 1.0) {
+          // fully opaque — copy car pixel directly
+          result.setPixelRgba(
+              x, y, src.r.toInt(), src.g.toInt(), src.b.toInt(), 255);
+        } else {
+          // partial transparency — blend over backdrop
+          final dst = result.getPixel(x, y);
+          final inv = 1.0 - a;
+          result.setPixelRgba(
+            x,
+            y,
+            (src.r.toDouble() * a + dst.r.toDouble() * inv).round().clamp(0, 255),
+            (src.g.toDouble() * a + dst.g.toDouble() * inv).round().clamp(0, 255),
+            (src.b.toDouble() * a + dst.b.toDouble() * inv).round().clamp(0, 255),
+            255,
+          );
+        }
+      }
+    }
+
+    return Uint8List.fromList(img.encodePng(result));
   }
 
   /// Small thumbnail for the background picker — cheap to generate synchronously.
@@ -37,7 +65,7 @@ class CompositorService {
   // ─── Internal ─────────────────────────────────────────────────────────────
 
   static img.Image _generate(ShowroomBackground bg, int w, int h) {
-    final im = img.Image(width: w, height: h, numChannels: 3);
+    final im = img.Image(width: w, height: h, numChannels: 4);
     bg == ShowroomBackground.light ? _light(im) : _dark(im);
     return im;
   }
@@ -59,7 +87,7 @@ class CompositorService {
           final xn = ((x / im.width) - 0.5).abs() * 2.0;
           v = (v * (1.0 - xn * xn * 0.14)).toInt().clamp(0, 255);
         }
-        im.setPixelRgb(x, y, v, v, v);
+        im.setPixelRgba(x, y, v, v, v, 255);
       }
     }
     _reflectionStripe(im, fy, boost: 24, radius: 14);
@@ -82,7 +110,7 @@ class CompositorService {
           final xn = ((x / im.width) - 0.5).abs() * 2.0;
           v = (v * (1.0 - xn * xn * 0.28)).toInt().clamp(0, 255);
         }
-        im.setPixelRgb(x, y, v, v, v);
+        im.setPixelRgba(x, y, v, v, v, 255);
       }
     }
     _reflectionStripe(im, fy, boost: 38, radius: 14);
@@ -100,7 +128,7 @@ class CompositorService {
       for (var x = 0; x < im.width; x++) {
         final px = im.getPixel(x, y);
         final v = (px.r.toInt() + b).clamp(0, 255);
-        im.setPixelRgb(x, y, v, v, v);
+        im.setPixelRgba(x, y, v, v, v, 255);
       }
     }
   }
