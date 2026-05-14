@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'services/segmentation_service.dart';
@@ -44,6 +45,7 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isProcessing = false;
   String? _errorMessage;
   final SegmentationService _segmentationService = SegmentationService();
+  final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void initState() {
@@ -74,15 +76,27 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _pickFromGallery() async {
+    final XFile? picked = await _imagePicker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 100,
+    );
+    if (picked == null || !mounted) return;
+    await _runSegmentation(File(picked.path));
+  }
+
   Future<void> _captureAndSegment() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    final XFile imageFile = await _cameraController!.takePicture();
+    await _runSegmentation(File(imageFile.path));
+  }
+
+  Future<void> _runSegmentation(File file) async {
     setState(() {
       _isProcessing = true;
       _errorMessage = null;
     });
     try {
-      final XFile imageFile = await _cameraController!.takePicture();
-      final File file = File(imageFile.path);
       final segmentedBytes = await _segmentationService.segmentCarImage(file);
       if (segmentedBytes != null && mounted) {
         await Navigator.of(context).push(
@@ -121,9 +135,26 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
       body: _buildBody(),
       floatingActionButton: _isCameraReady && !_isProcessing
-          ? FloatingActionButton.large(
-              onPressed: _captureAndSegment,
-              child: const Icon(Icons.camera_alt),
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  FloatingActionButton.extended(
+                    heroTag: 'gallery',
+                    onPressed: _pickFromGallery,
+                    icon: const Icon(Icons.photo_library),
+                    label: const Text('Gallery'),
+                    backgroundColor: Colors.white12,
+                    foregroundColor: Colors.white,
+                  ),
+                  FloatingActionButton.large(
+                    heroTag: 'camera',
+                    onPressed: _captureAndSegment,
+                    child: const Icon(Icons.camera_alt),
+                  ),
+                ],
+              ),
             )
           : null,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
