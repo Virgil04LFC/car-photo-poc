@@ -32,6 +32,10 @@
 /android/captures/
 /android/gradlew
 /android/gradlew.bat
+# Groovy DSL files — Flutter regenerates these from templates but KTS versions are canonical
+/android/build.gradle
+/android/settings.gradle
+/android/app/build.gradle
 /android/local.properties
 /android/**/GeneratedPluginRegistrant.java
 /android/**/local.properties
