@@ -19,7 +19,8 @@ dependencies:
 
   # Image handling
   image_picker: ^1.0.7
-  image: ^4.1.7
+  # Native platform resize (libjpeg-turbo on Android) — replaces pure-Dart image package
+  flutter_image_compress: ^2.3.0
 
   # Gallery save
   gal: ^2.3.0

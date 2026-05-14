@@ -4,11 +4,9 @@ import 'dart:math' show min;
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:http/http.dart' as http;
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -36,36 +34,6 @@ class _PerfLog {
   int get totalMs => _sw.elapsedMilliseconds;
 }
 
-// ─── Resize helper (top-level — required for compute()) ──────────────────────
-
-class _ResizeArgs {
-  final Uint8List bytes;
-  final int maxLongEdge;
-  final int quality;
-  const _ResizeArgs(this.bytes, this.maxLongEdge, this.quality);
-}
-
-Uint8List _resizeForUpload(_ResizeArgs args) {
-  final decoded = img.decodeImage(args.bytes);
-  if (decoded == null) return args.bytes;
-
-  final w = decoded.width;
-  final h = decoded.height;
-  final longEdge = w > h ? w : h;
-
-  img.Image source = decoded;
-  if (longEdge > args.maxLongEdge) {
-    final scale = args.maxLongEdge / longEdge;
-    source = img.copyResize(
-      decoded,
-      width: (w * scale).round(),
-      height: (h * scale).round(),
-      interpolation: img.Interpolation.linear,
-    );
-  }
-
-  return Uint8List.fromList(img.encodeJpg(source, quality: args.quality));
-}
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -184,10 +152,14 @@ class _CameraScreenState extends State<CameraScreen> {
       final originalBytes = await file.readAsBytes();
       perf.mark('read');
 
-      // 2. Resize on background isolate (pure-Dart image pkg — may be slow)
-      final uploadBytes = await compute(
-        _resizeForUpload,
-        _ResizeArgs(originalBytes, kMaxLongEdgePx, kUploadJpegQuality),
+      // 2. Native resize via flutter_image_compress (libjpeg-turbo on Android)
+      //    Async platform channel — no isolate needed, ~10x faster than pure-Dart image pkg
+      final uploadBytes = await FlutterImageCompress.compressWithList(
+        originalBytes,
+        minWidth: kMaxLongEdgePx,
+        minHeight: kMaxLongEdgePx,
+        quality: kUploadJpegQuality,
+        format: CompressFormat.jpeg,
       );
       perf.mark('resize');
 
