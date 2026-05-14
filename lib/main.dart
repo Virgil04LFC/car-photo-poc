@@ -1,3 +1,4 @@
+import 'dart:developer' show log;
 import 'dart:io';
 import 'dart:math' show min;
 import 'dart:typed_data';
@@ -12,6 +13,29 @@ import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'config.dart';
+
+// ─── Perf timing ──────────────────────────────────────────────────────────────
+
+class _PerfLog {
+  final _sw = Stopwatch()..start();
+  final _marks = <String, int>{};
+
+  void mark(String label) => _marks[label] = _sw.elapsedMilliseconds;
+
+  void dump() {
+    final entries = _marks.entries.toList();
+    final parts = <String>[];
+    for (var i = 0; i < entries.length; i++) {
+      final prev = i == 0 ? 0 : entries[i - 1].value;
+      final delta = entries[i].value - prev;
+      parts.add('${entries[i].key}=+${delta}ms');
+    }
+    log('[PERF] ${parts.join(' ')} | total=${_sw.elapsedMilliseconds}ms',
+        name: 'CarPhoto');
+  }
+
+  int get totalMs => _sw.elapsedMilliseconds;
+}
 
 // ─── Resize helper (top-level — required for compute()) ──────────────────────
 
@@ -85,6 +109,10 @@ class _CameraScreenState extends State<CameraScreen> {
   String _selectedBackgroundId = kDefaultBackgroundId;
   final ImagePicker _imagePicker = ImagePicker();
 
+  // Retry support — remember last input so error screen can re-process
+  File? _lastFile;
+  bool _lastFromCamera = false;
+
   @override
   void initState() {
     super.initState();
@@ -140,24 +168,34 @@ class _CameraScreenState extends State<CameraScreen> {
   // ── Backend processing ─────────────────────────────────────────────────────
 
   Future<void> _processWithBackend(File file, {required bool fromCamera}) async {
+    // Remember for retry
+    _lastFile = file;
+    _lastFromCamera = fromCamera;
+
     setState(() {
       _isProcessing = true;
       _statusMessage = 'Resizing…';
       _errorMessage = null;
     });
 
+    final perf = _PerfLog();
+
     try {
-      // 1. Read + resize on background isolate
+      // 1. Read source file
       final originalBytes = await file.readAsBytes();
+      perf.mark('read');
+
+      // 2. Resize on background isolate (pure-Dart image pkg — may be slow)
       final uploadBytes = await compute(
         _resizeForUpload,
         _ResizeArgs(originalBytes, kMaxLongEdgePx, kUploadJpegQuality),
       );
+      perf.mark('resize');
 
       if (!mounted) return;
       setState(() => _statusMessage = 'Uploading…');
 
-      // 2. POST multipart to backend
+      // 3. POST multipart to backend
       final uri = Uri.parse('$kBackendBaseUrl/process');
       final request = http.MultipartRequest('POST', uri);
       request.fields['background_id'] = _selectedBackgroundId;
@@ -172,7 +210,10 @@ class _CameraScreenState extends State<CameraScreen> {
       setState(() => _statusMessage = 'Processing…');
 
       final streamed = await request.send().timeout(const Duration(seconds: 90));
+      perf.mark('upload_headers');
+
       final response = await http.Response.fromStream(streamed);
+      perf.mark('response_body');
 
       if (!mounted) return;
 
@@ -182,14 +223,40 @@ class _CameraScreenState extends State<CameraScreen> {
         throw Exception('Server error ${response.statusCode}: $excerpt');
       }
 
-      // 3. Navigate to result
+      // 4. Parse timing headers from backend
+      final backendMs = int.tryParse(
+            response.headers['x-processing-time-ms'] ?? '',
+          ) ??
+          0;
+      final resizeServerMs = int.tryParse(
+            response.headers['x-resize-time-ms'] ?? '',
+          ) ??
+          0;
+      final photoroomMs = int.tryParse(
+            response.headers['x-photoroom-time-ms'] ?? '',
+          ) ??
+          0;
+
+      // 5. Navigate to result
       final resultPng = response.bodyBytes;
+      perf.dump();
+
+      log(
+        '[PERF] backend total=${backendMs}ms '
+        '(server_resize=${resizeServerMs}ms photoroom=${photoroomMs}ms) '
+        '| phone total=${perf.totalMs}ms',
+        name: 'CarPhoto',
+      );
+
+      if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute(
           builder: (_) => ResultScreen(
             originalFile: file,
             resultBytes: resultPng,
             fromCamera: fromCamera,
+            totalMs: perf.totalMs,
+            backendMs: backendMs,
           ),
         ),
       );
@@ -210,6 +277,12 @@ class _CameraScreenState extends State<CameraScreen> {
     }
     if (msg.contains('TimeoutException')) {
       return 'Processing timed out — try again.';
+    }
+    if (msg.contains('Server error 502')) {
+      return 'Background service error — try again.';
+    }
+    if (msg.contains('Server error 504')) {
+      return 'Processing timed out on the server — try again.';
     }
     return 'Processing failed:\n$msg';
   }
@@ -336,9 +409,25 @@ class _CameraScreenState extends State<CameraScreen> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: () => setState(() => _errorMessage = null),
-                child: const Text('Retry'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Retry re-processes the same image — no need to recapture
+                  if (_lastFile != null)
+                    ElevatedButton.icon(
+                      onPressed: () => _processWithBackend(
+                        _lastFile!,
+                        fromCamera: _lastFromCamera,
+                      ),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                    ),
+                  if (_lastFile != null) const SizedBox(width: 12),
+                  OutlinedButton(
+                    onPressed: () => setState(() => _errorMessage = null),
+                    child: const Text('Dismiss'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -589,12 +678,23 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
           ),
 
-          // ── Hint ──────────────────────────────────────────────────────
+          // ── Timing badge + hint ────────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 4),
-            child: Text(
-              'Pinch to zoom · Double-tap to reset',
-              style: const TextStyle(color: Colors.white30, fontSize: 11),
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            child: Column(
+              children: [
+                if (widget.totalMs > 0)
+                  Text(
+                    '⚡ ${(widget.totalMs / 1000).toStringAsFixed(1)}s total'
+                    '${widget.backendMs > 0 ? ' · ${(widget.backendMs / 1000).toStringAsFixed(1)}s server' : ''}',
+                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+                const SizedBox(height: 2),
+                const Text(
+                  'Pinch to zoom · Double-tap to reset',
+                  style: TextStyle(color: Colors.white30, fontSize: 11),
+                ),
+              ],
             ),
           ),
 
