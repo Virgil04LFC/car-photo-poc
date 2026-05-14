@@ -14,8 +14,9 @@ import 'package:flutter/material.dart';
 const String kBackendBaseUrl = 'http://10.0.2.2:8080';
 
 // ─── Image resize ─────────────────────────────────────────────────────────────
-/// Longest edge to resize to before upload. Reduces data without losing quality.
-const int kMaxLongEdgePx = 3000;
+/// Longest edge to resize to before upload.
+/// 2000px: buffer above typical 1500–1920px dealer display width, keeps upload fast.
+const int kMaxLongEdgePx = 2000;
 
 /// JPEG quality for the upload copy. 92 = visually lossless.
 const int kUploadJpegQuality = 92;
