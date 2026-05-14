@@ -75,10 +75,10 @@ class _BatchScreenState extends State<BatchScreen> {
         final tmpFile = File('${tmpDir.path}/$name');
         await tmpFile.writeAsBytes(item.resultBytes!);
         await SaverGallery.saveFile(
-          file: tmpFile.path,
-          name: name,
+          filePath: tmpFile.path,
+          fileName: name,
           androidRelativePath: 'Pictures/Car Photo',
-          androidExistNotSave: false,
+          skipIfExists: false,
         );
         await tmpFile.delete();
         _savedCount++;

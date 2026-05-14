@@ -612,10 +612,10 @@ class _ResultScreenState extends State<ResultScreen> {
       final tmpFile = File('${tmpDir.path}/$name');
       await tmpFile.writeAsBytes(widget.resultBytes);
       await SaverGallery.saveFile(
-        file: tmpFile.path,
-        name: name,
+        filePath: tmpFile.path,
+        fileName: name,
         androidRelativePath: 'Pictures/Car Photo',
-        androidExistNotSave: false,
+        skipIfExists: false,
       );
       await tmpFile.delete();
 
