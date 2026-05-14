@@ -1,4 +1,4 @@
-import 'dart:developer' show log;
+// dart:developer log() goes to DevTools stream, not terminal — use debugPrint instead
 import 'dart:io';
 import 'dart:math' show min;
 import 'dart:typed_data';
@@ -30,8 +30,7 @@ class _PerfLog {
       final delta = entries[i].value - prev;
       parts.add('${entries[i].key}=+${delta}ms');
     }
-    log('[PERF] ${parts.join(' ')} | total=${_sw.elapsedMilliseconds}ms',
-        name: 'CarPhoto');
+    debugPrint('[PERF] ${parts.join(' ')} | total=${_sw.elapsedMilliseconds}ms');
   }
 
   int get totalMs => _sw.elapsedMilliseconds;
@@ -241,11 +240,10 @@ class _CameraScreenState extends State<CameraScreen> {
       final resultPng = response.bodyBytes;
       perf.dump();
 
-      log(
+      debugPrint(
         '[PERF] backend total=${backendMs}ms '
         '(server_resize=${resizeServerMs}ms photoroom=${photoroomMs}ms) '
         '| phone total=${perf.totalMs}ms',
-        name: 'CarPhoto',
       );
 
       if (!mounted) return;
