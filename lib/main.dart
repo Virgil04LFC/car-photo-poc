@@ -1,20 +1,54 @@
 import 'dart:io';
+import 'dart:math' show min;
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import 'services/compositor_service.dart';
-import 'services/segmentation_service.dart';
+import 'config.dart';
+
+// ─── Resize helper (top-level — required for compute()) ──────────────────────
+
+class _ResizeArgs {
+  final Uint8List bytes;
+  final int maxLongEdge;
+  final int quality;
+  const _ResizeArgs(this.bytes, this.maxLongEdge, this.quality);
+}
+
+Uint8List _resizeForUpload(_ResizeArgs args) {
+  final decoded = img.decodeImage(args.bytes);
+  if (decoded == null) return args.bytes;
+
+  final w = decoded.width;
+  final h = decoded.height;
+  final longEdge = w > h ? w : h;
+
+  img.Image source = decoded;
+  if (longEdge > args.maxLongEdge) {
+    final scale = args.maxLongEdge / longEdge;
+    source = img.copyResize(
+      decoded,
+      width: (w * scale).round(),
+      height: (h * scale).round(),
+      interpolation: img.Interpolation.linear,
+    );
+  }
+
+  return Uint8List.fromList(img.encodeJpg(source, quality: args.quality));
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Permission.camera.request();
-  await Permission.storage.request();
   runApp(const CarPhotoPOC());
 }
 
@@ -24,7 +58,7 @@ class CarPhotoPOC extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Car Photo POC',
+      title: 'Car Photo',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       home: const CameraScreen(),
@@ -32,7 +66,7 @@ class CarPhotoPOC extends StatelessWidget {
   }
 }
 
-// ─── Camera Screen ───────────────────────────────────────────────────────────
+// ─── Camera Screen ────────────────────────────────────────────────────────────
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -46,29 +80,30 @@ class _CameraScreenState extends State<CameraScreen> {
   List<CameraDescription>? _cameras;
   bool _isCameraReady = false;
   bool _isProcessing = false;
+  String _statusMessage = '';
   String? _errorMessage;
-  final SegmentationService _segmentationService = SegmentationService();
+  String _selectedBackgroundId = kDefaultBackgroundId;
   final ImagePicker _imagePicker = ImagePicker();
 
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    _initCamera();
   }
 
-  Future<void> _initializeCamera() async {
+  Future<void> _initCamera() async {
     try {
       _cameras = await availableCameras();
       if (_cameras == null || _cameras!.isEmpty) {
         setState(() => _errorMessage = 'No camera found');
         return;
       }
-      final backCamera = _cameras!.firstWhere(
+      final back = _cameras!.firstWhere(
         (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => _cameras!.first,
       );
       _cameraController = CameraController(
-        backCamera,
+        back,
         ResolutionPreset.high,
         enableAudio: false,
       );
@@ -79,88 +114,209 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    super.dispose();
+  }
+
+  // ── Input sources ──────────────────────────────────────────────────────────
+
   Future<void> _pickFromGallery() async {
-    final XFile? picked = await _imagePicker.pickImage(
+    final picked = await _imagePicker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 100,
     );
     if (picked == null || !mounted) return;
-    await _runSegmentation(File(picked.path));
+    await _processWithBackend(File(picked.path), fromCamera: false);
   }
 
-  Future<void> _captureAndSegment() async {
+  Future<void> _capture() async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) return;
-    final XFile imageFile = await _cameraController!.takePicture();
-    await _runSegmentation(File(imageFile.path));
+    final xfile = await _cameraController!.takePicture();
+    await _processWithBackend(File(xfile.path), fromCamera: true);
   }
 
-  Future<void> _runSegmentation(File file) async {
+  // ── Backend processing ─────────────────────────────────────────────────────
+
+  Future<void> _processWithBackend(File file, {required bool fromCamera}) async {
     setState(() {
       _isProcessing = true;
+      _statusMessage = 'Resizing…';
       _errorMessage = null;
     });
+
     try {
-      final segmentedBytes = await _segmentationService.segmentCarImage(file);
-      if (segmentedBytes != null && mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => ResultScreen(
-              originalFile: file,
-              segmentedBytes: segmentedBytes,
-            ),
-          ),
-        );
-      } else {
-        setState(() => _errorMessage = 'Segmentation returned no result');
+      // 1. Read + resize on background isolate
+      final originalBytes = await file.readAsBytes();
+      final uploadBytes = await compute(
+        _resizeForUpload,
+        _ResizeArgs(originalBytes, kMaxLongEdgePx, kUploadJpegQuality),
+      );
+
+      if (!mounted) return;
+      setState(() => _statusMessage = 'Uploading…');
+
+      // 2. POST multipart to backend
+      final uri = Uri.parse('$kBackendBaseUrl/process');
+      final request = http.MultipartRequest('POST', uri);
+      request.fields['background_id'] = _selectedBackgroundId;
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'image',
+          uploadBytes,
+          filename: 'car.jpg',
+        ),
+      );
+
+      setState(() => _statusMessage = 'Processing…');
+
+      final streamed = await request.send().timeout(const Duration(seconds: 90));
+      final response = await http.Response.fromStream(streamed);
+
+      if (!mounted) return;
+
+      if (response.statusCode != 200) {
+        final body = response.body;
+        final excerpt = body.substring(0, min(200, body.length));
+        throw Exception('Server error ${response.statusCode}: $excerpt');
       }
-    } catch (e) {
-      setState(() => _errorMessage = 'Processing failed: $e');
+
+      // 3. Navigate to result
+      final resultPng = response.bodyBytes;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ResultScreen(
+            originalFile: file,
+            resultBytes: resultPng,
+            fromCamera: fromCamera,
+          ),
+        ),
+      );
+    } on Exception catch (e) {
+      if (mounted) setState(() => _errorMessage = _friendlyError(e));
     } finally {
-      if (mounted) setState(() => _isProcessing = false);
+      if (mounted) setState(() {
+        _isProcessing = false;
+        _statusMessage = '';
+      });
     }
   }
 
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    _segmentationService.close();
-    super.dispose();
+  String _friendlyError(Exception e) {
+    final msg = e.toString();
+    if (msg.contains('SocketException') || msg.contains('Connection refused')) {
+      return 'Cannot reach server.\nCheck backend URL in config.dart.';
+    }
+    if (msg.contains('TimeoutException')) {
+      return 'Processing timed out — try again.';
+    }
+    return 'Processing failed:\n$msg';
   }
+
+  // ── Background picker ──────────────────────────────────────────────────────
+
+  void _showBackgroundPicker() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _BackgroundPickerSheet(
+        selectedId: _selectedBackgroundId,
+        onSelect: (id) {
+          setState(() => _selectedBackgroundId = id);
+          Navigator.of(ctx).pop();
+        },
+      ),
+    );
+  }
+
+  BackgroundOption get _selectedBackground =>
+      kBackgrounds.firstWhere((b) => b.id == _selectedBackgroundId);
+
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Car Photo POC'),
+        title: const Text('Car Photo'),
         centerTitle: true,
         backgroundColor: Colors.black,
       ),
       body: _buildBody(),
       floatingActionButton: _isCameraReady && !_isProcessing
-          ? Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  FloatingActionButton.extended(
-                    heroTag: 'gallery',
-                    onPressed: _pickFromGallery,
-                    icon: const Icon(Icons.photo_library),
-                    label: const Text('Gallery'),
-                    backgroundColor: Colors.white12,
-                    foregroundColor: Colors.white,
-                  ),
-                  FloatingActionButton.large(
-                    heroTag: 'camera',
-                    onPressed: _captureAndSegment,
-                    child: const Icon(Icons.camera_alt),
-                  ),
-                ],
-              ),
-            )
+          ? _buildFab()
           : null,
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+    );
+  }
+
+  Widget _buildFab() {
+    final bg = _selectedBackground;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Background selector chip
+          GestureDetector(
+            onTap: _showBackgroundPicker,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.white24),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: bg.color,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white38),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    bg.name,
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.expand_more, color: Colors.white54, size: 18),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Camera + Gallery buttons
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              FloatingActionButton.extended(
+                heroTag: 'gallery',
+                onPressed: _pickFromGallery,
+                icon: const Icon(Icons.photo_library),
+                label: const Text('Gallery'),
+                backgroundColor: Colors.white12,
+                foregroundColor: Colors.white,
+              ),
+              FloatingActionButton.large(
+                heroTag: 'camera',
+                onPressed: _capture,
+                child: const Icon(Icons.camera_alt),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -172,11 +328,13 @@ class _CameraScreenState extends State<CameraScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, color: Colors.red, size: 48),
+              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
               const SizedBox(height: 16),
-              Text(_errorMessage!,
-                  style: const TextStyle(color: Colors.red),
-                  textAlign: TextAlign.center),
+              Text(
+                _errorMessage!,
+                style: const TextStyle(color: Colors.redAccent),
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: () => setState(() => _errorMessage = null),
@@ -187,23 +345,27 @@ class _CameraScreenState extends State<CameraScreen> {
         ),
       );
     }
+
     if (!_isCameraReady) {
       return const Center(child: CircularProgressIndicator());
     }
+
     return Stack(
       children: [
         Positioned.fill(child: CameraPreview(_cameraController!)),
         if (_isProcessing)
           Container(
             color: Colors.black54,
-            child: const Center(
+            child: Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CircularProgressIndicator(color: Colors.white),
-                  SizedBox(height: 16),
-                  Text('Segmenting…',
-                      style: TextStyle(color: Colors.white, fontSize: 18)),
+                  const CircularProgressIndicator(color: Colors.white),
+                  const SizedBox(height: 16),
+                  Text(
+                    _statusMessage,
+                    style: const TextStyle(color: Colors.white, fontSize: 18),
+                  ),
                 ],
               ),
             ),
@@ -213,18 +375,111 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 }
 
-// ─── Result Screen ───────────────────────────────────────────────────────────
+// ─── Background Picker Sheet ──────────────────────────────────────────────────
 
-enum _ViewMode { original, cutout, composite }
+class _BackgroundPickerSheet extends StatelessWidget {
+  final String selectedId;
+  final ValueChanged<String> onSelect;
+
+  const _BackgroundPickerSheet({
+    required this.selectedId,
+    required this.onSelect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: 12),
+        Container(
+          width: 40,
+          height: 4,
+          decoration: BoxDecoration(
+            color: Colors.white24,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text(
+          'Choose Background',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: kBackgrounds.map((bg) {
+              final selected = bg.id == selectedId;
+              return GestureDetector(
+                onTap: () => onSelect(bg.id),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      width: 64,
+                      height: 64,
+                      decoration: BoxDecoration(
+                        color: bg.color,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: selected ? Colors.blue : Colors.white24,
+                          width: selected ? 3 : 1,
+                        ),
+                      ),
+                      child: selected
+                          ? const Center(
+                              child: Icon(Icons.check, color: Colors.blue, size: 28),
+                            )
+                          : null,
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: 72,
+                      child: Text(
+                        bg.name,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: selected ? Colors.white : Colors.white60,
+                          fontSize: 11,
+                          fontWeight:
+                              selected ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        SizedBox(height: MediaQuery.of(context).padding.bottom),
+      ],
+    );
+  }
+}
+
+// ─── Result Screen ────────────────────────────────────────────────────────────
+
+enum _ViewMode { original, result }
 
 class ResultScreen extends StatefulWidget {
   final File originalFile;
-  final Uint8List segmentedBytes;
+  final Uint8List resultBytes;
+  final bool fromCamera;
 
   const ResultScreen({
     super.key,
     required this.originalFile,
-    required this.segmentedBytes,
+    required this.resultBytes,
+    required this.fromCamera,
   });
 
   @override
@@ -232,27 +487,9 @@ class ResultScreen extends StatefulWidget {
 }
 
 class _ResultScreenState extends State<ResultScreen> {
-  _ViewMode _mode = _ViewMode.composite;
-  ShowroomBackground _selectedBg = ShowroomBackground.light;
-
-  Uint8List? _compositeBytes;
-  bool _compositing = false;
+  _ViewMode _mode = _ViewMode.result;
   bool _saving = false;
-
   final TransformationController _xController = TransformationController();
-
-  // Small preview thumbnails for the background picker — generated once.
-  late final Map<ShowroomBackground, Uint8List> _thumbs;
-
-  @override
-  void initState() {
-    super.initState();
-    _thumbs = {
-      for (final bg in ShowroomBackground.values)
-        bg: CompositorService.thumbnail(bg),
-    };
-    _buildComposite();
-  }
 
   @override
   void dispose() {
@@ -260,41 +497,25 @@ class _ResultScreenState extends State<ResultScreen> {
     super.dispose();
   }
 
-  // ── Compositing ─────────────────────────────────────────────────────────────
+  void _resetZoom() => _xController.value = Matrix4.identity();
 
-  Future<void> _buildComposite() async {
-    setState(() {
-      _compositing = true;
-      _compositeBytes = null;
-    });
-    try {
-      final bytes = await compute(
-        runComposite,
-        CompositeArgs(widget.segmentedBytes, _selectedBg),
-      );
-      if (mounted) setState(() => _compositeBytes = bytes);
-    } catch (e) {
-      if (mounted) _snack('Composite failed: $e');
-    } finally {
-      if (mounted) setState(() => _compositing = false);
-    }
-  }
-
-  Future<void> _switchBackground(ShowroomBackground bg) async {
-    if (bg == _selectedBg && _compositeBytes != null) return;
-    _resetZoom();
-    setState(() => _selectedBg = bg);
-    await _buildComposite();
-  }
-
-  // ── Save ─────────────────────────────────────────────────────────────────────
+  // ── Save to gallery ────────────────────────────────────────────────────────
 
   Future<void> _saveToGallery() async {
-    if (_compositeBytes == null) return;
     setState(() => _saving = true);
     try {
       final name = 'car_${DateTime.now().millisecondsSinceEpoch}.png';
-      await Gal.putImageBytes(_compositeBytes!, name: name);
+      await Gal.putImageBytes(widget.resultBytes, name: name);
+
+      // Clean up temp camera file after successful save
+      if (widget.fromCamera) {
+        try {
+          await widget.originalFile.delete();
+        } catch (_) {
+          // Non-fatal — temp cleanup is best-effort
+        }
+      }
+
       if (mounted) _snack('Saved to gallery ✓');
     } catch (e) {
       if (mounted) _snack('Save failed: $e');
@@ -303,93 +524,49 @@ class _ResultScreenState extends State<ResultScreen> {
     }
   }
 
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-
-  void _resetZoom() => _xController.value = Matrix4.identity();
-
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
     );
   }
 
-  // ── Build ─────────────────────────────────────────────────────────────────────
-
-  String get _title => switch (_mode) {
-        _ViewMode.original => 'Original',
-        _ViewMode.cutout => 'Cutout',
-        _ViewMode.composite => 'Composite',
-      };
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   Widget get _activeImage {
-    switch (_mode) {
-      case _ViewMode.original:
-        return Image.file(widget.originalFile, fit: BoxFit.contain);
-      case _ViewMode.cutout:
-        return _CheckeredBackground(
-          child: Image.memory(
-            widget.segmentedBytes,
-            fit: BoxFit.contain,
-            gaplessPlayback: true,
-          ),
-        );
-      case _ViewMode.composite:
-        if (_compositing) {
-          return const Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 12),
-                Text('Building composite…',
-                    style: TextStyle(color: Colors.white54)),
-              ],
-            ),
-          );
-        }
-        if (_compositeBytes == null) {
-          return const Center(
-            child: Text('No composite',
-                style: TextStyle(color: Colors.white38)),
-          );
-        }
-        return Image.memory(
-          _compositeBytes!,
+    return switch (_mode) {
+      _ViewMode.original =>
+        Image.file(widget.originalFile, fit: BoxFit.contain),
+      _ViewMode.result => Image.memory(
+          widget.resultBytes,
           fit: BoxFit.contain,
           gaplessPlayback: true,
-        );
-    }
+        ),
+    };
   }
 
   @override
   Widget build(BuildContext context) {
-    final canSave =
-        _mode == _ViewMode.composite && _compositeBytes != null && !_compositing;
-
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: Text(_title),
+        title: Text(_mode == _ViewMode.original ? 'Original' : 'Result'),
         centerTitle: true,
         actions: [
-          // Save button — only when composite is ready
-          if (canSave)
-            _saving
-                ? const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : IconButton(
-                    icon: const Icon(Icons.save_alt),
-                    tooltip: 'Save to gallery',
-                    onPressed: _saveToGallery,
+          _saving
+              ? const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-          // Reset zoom
+                )
+              : IconButton(
+                  icon: const Icon(Icons.save_alt),
+                  tooltip: 'Save result to gallery',
+                  onPressed: _mode == _ViewMode.result ? _saveToGallery : null,
+                ),
           IconButton(
             icon: const Icon(Icons.fit_screen),
             tooltip: 'Reset zoom',
@@ -399,7 +576,7 @@ class _ResultScreenState extends State<ResultScreen> {
       ),
       body: Column(
         children: [
-          // ── Full-screen zoomable image ──────────────────────────────────
+          // ── Zoomable image ─────────────────────────────────────────────
           Expanded(
             child: GestureDetector(
               onDoubleTap: _resetZoom,
@@ -412,33 +589,31 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
           ),
 
-          // ── Hint ────────────────────────────────────────────────────────
+          // ── Hint ──────────────────────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            padding: const EdgeInsets.only(top: 4, bottom: 4),
             child: Text(
               'Pinch to zoom · Double-tap to reset',
-              style: TextStyle(color: Colors.white30, fontSize: 11),
+              style: const TextStyle(color: Colors.white30, fontSize: 11),
             ),
           ),
 
-          // ── 3-way mode toggle ───────────────────────────────────────────
+          // ── 2-way toggle ───────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
             child: Row(
               children: [
                 for (final mode in _ViewMode.values) ...[
-                  if (mode.index > 0) const SizedBox(width: 8),
+                  if (mode.index > 0) const SizedBox(width: 10),
                   Expanded(
                     child: _ModeButton(
                       label: switch (mode) {
                         _ViewMode.original => 'Original',
-                        _ViewMode.cutout => 'Cutout',
-                        _ViewMode.composite => 'Composite',
+                        _ViewMode.result => 'Result',
                       },
                       icon: switch (mode) {
                         _ViewMode.original => Icons.photo_camera,
-                        _ViewMode.cutout => Icons.auto_fix_high,
-                        _ViewMode.composite => Icons.layers,
+                        _ViewMode.result => Icons.auto_fix_high,
                       },
                       selected: _mode == mode,
                       onTap: () {
@@ -452,33 +627,6 @@ class _ResultScreenState extends State<ResultScreen> {
             ),
           ),
 
-          // ── Background picker (composite mode only) ─────────────────────
-          AnimatedSize(
-            duration: const Duration(milliseconds: 200),
-            curve: Curves.easeInOut,
-            child: _mode == _ViewMode.composite
-                ? Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                    child: Row(
-                      children: [
-                        for (final bg in ShowroomBackground.values) ...[
-                          if (bg.index > 0) const SizedBox(width: 10),
-                          Expanded(
-                            child: _BgCard(
-                              label: CompositorService.labels[bg]!,
-                              thumbnail: _thumbs[bg]!,
-                              selected: _selectedBg == bg,
-                              onTap: () => _switchBackground(bg),
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  )
-                : const SizedBox.shrink(),
-          ),
-
-          // Safe area bottom
           SizedBox(height: 12 + MediaQuery.of(context).padding.bottom),
         ],
       ),
@@ -508,7 +656,7 @@ class _ModeButton extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(vertical: 10),
+        padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
           color: selected
               ? Colors.blue.withOpacity(0.15)
@@ -519,13 +667,13 @@ class _ModeButton extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 18),
-            const SizedBox(height: 3),
+            Icon(icon, color: color, size: 20),
+            const SizedBox(height: 4),
             Text(
               label,
               style: TextStyle(
                 color: color,
-                fontSize: 12,
+                fontSize: 13,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
@@ -534,120 +682,4 @@ class _ModeButton extends StatelessWidget {
       ),
     );
   }
-}
-
-// ─── Background Picker Card ───────────────────────────────────────────────────
-
-class _BgCard extends StatelessWidget {
-  final String label;
-  final Uint8List thumbnail;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _BgCard({
-    required this.label,
-    required this.thumbnail,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: selected ? Colors.blue : Colors.white24,
-            width: selected ? 2.5 : 1,
-          ),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: Stack(
-            children: [
-              // Background thumbnail
-              Image.memory(
-                thumbnail,
-                width: double.infinity,
-                height: 64,
-                fit: BoxFit.cover,
-              ),
-              // Selected tick
-              if (selected)
-                Positioned(
-                  top: 5,
-                  right: 5,
-                  child: Container(
-                    padding: const EdgeInsets.all(2),
-                    decoration: const BoxDecoration(
-                      color: Colors.blue,
-                      shape: BoxShape.circle,
-                    ),
-                    child:
-                        const Icon(Icons.check, color: Colors.white, size: 12),
-                  ),
-                ),
-              // Label
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  color: Colors.black54,
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Checkerboard Background (cutout view) ────────────────────────────────────
-
-class _CheckeredBackground extends StatelessWidget {
-  final Widget child;
-  const _CheckeredBackground({required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(painter: _CheckerPainter(), child: child);
-  }
-}
-
-class _CheckerPainter extends CustomPainter {
-  static const _cell = 16.0;
-  static const _light = Color(0xFFAAAAAA);
-  static const _dark = Color(0xFF777777);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final p = Paint();
-    for (var row = 0; row * _cell < size.height; row++) {
-      for (var col = 0; col * _cell < size.width; col++) {
-        p.color = (row + col).isEven ? _light : _dark;
-        canvas.drawRect(
-          Rect.fromLTWH(col * _cell, row * _cell, _cell, _cell),
-          p,
-        );
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_CheckerPainter _) => false;
 }
