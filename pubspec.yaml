@@ -22,8 +22,9 @@ dependencies:
   # Native platform resize (libjpeg-turbo on Android) — replaces pure-Dart image package
   flutter_image_compress: ^2.3.0
 
-  # Gallery save
-  gal: ^2.3.0
+  # Gallery save — saver_gallery uses androidRelativePath (MediaStore RELATIVE_PATH)
+  # which correctly creates named albums on Android 10+. gal does not expose this field.
+  saver_gallery: ^4.1.1
   path_provider: ^2.1.0
 
   # Permissions

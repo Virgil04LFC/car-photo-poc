@@ -10,8 +10,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:saver_gallery/saver_gallery.dart';
 
 import 'batch.dart';
 
@@ -68,11 +68,18 @@ class _BatchScreenState extends State<BatchScreen> {
     try {
       for (final item in _ctrl.items) {
         if (!item.selectedForSave || item.resultBytes == null) continue;
-        // Write to temp file then hand to Gal — more reliable for named albums on Android
+        // Write to temp file, then SaverGallery.saveFile with androidRelativePath.
+        // This maps to MediaStore RELATIVE_PATH = "Pictures/Car Photo", which
+        // creates a dedicated named album on Android 10+ (API 29+).
         final name = 'car_${(item.index + 1).toString().padLeft(3, '0')}_result.png';
         final tmpFile = File('${tmpDir.path}/$name');
         await tmpFile.writeAsBytes(item.resultBytes!);
-        await Gal.putImage(tmpFile.path, album: 'Car Photo');
+        await SaverGallery.saveFile(
+          file: tmpFile.path,
+          name: name,
+          androidRelativePath: 'Pictures/Car Photo',
+          androidExistNotSave: false,
+        );
         await tmpFile.delete();
         _savedCount++;
         item.resultBytes = null; // free memory

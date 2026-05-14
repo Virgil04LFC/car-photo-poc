@@ -6,7 +6,8 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:saver_gallery/saver_gallery.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -607,7 +608,16 @@ class _ResultScreenState extends State<ResultScreen> {
     setState(() => _saving = true);
     try {
       final name = 'car_${DateTime.now().millisecondsSinceEpoch}.png';
-      await Gal.putImageBytes(widget.resultBytes, name: name);
+      final tmpDir = await getTemporaryDirectory();
+      final tmpFile = File('${tmpDir.path}/$name');
+      await tmpFile.writeAsBytes(widget.resultBytes);
+      await SaverGallery.saveFile(
+        file: tmpFile.path,
+        name: name,
+        androidRelativePath: 'Pictures/Car Photo',
+        androidExistNotSave: false,
+      );
+      await tmpFile.delete();
 
       // Clean up temp camera file after successful save
       if (widget.fromCamera) {
