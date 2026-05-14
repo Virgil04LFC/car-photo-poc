@@ -29,15 +29,29 @@ class CompositorService {
     final car = img.decodePng(segmentedPng)!;
     final result = _generate(bg, car.width, car.height);
 
+    // Diagnostic 1: backdrop sanity check
+    final bdCentre = result.getPixel(result.width ~/ 2, result.height ~/ 2);
+    print('[COMP] backdrop: \${result.width}x\${result.height} '
+        'numChannels=\${result.numChannels} '
+        'centre pixel r=\${bdCentre.r.toInt()} g=\${bdCentre.g.toInt()} '
+        'b=\${bdCentre.b.toInt()} a=\${bdCentre.a.toInt()}');
+    // Diagnostic 2: car image format
+    print('[COMP] car: \${car.width}x\${car.height} numChannels=\${car.numChannels}');
+
+    int copied = 0, transparent = 0, blended = 0;
     for (var y = 0; y < car.height; y++) {
       for (var x = 0; x < car.width; x++) {
         final src = car.getPixel(x, y);
         final a = src.a.toDouble() / 255.0;
-        if (a <= 0.0) continue; // fully transparent — keep backdrop pixel
+        if (a <= 0.0) {
+          transparent++;
+          continue; // fully transparent — keep backdrop pixel
+        }
         if (a >= 1.0) {
           // fully opaque — copy car pixel directly
           result.setPixelRgba(
               x, y, src.r.toInt(), src.g.toInt(), src.b.toInt(), 255);
+          copied++;
         } else {
           // partial transparency — blend over backdrop
           final dst = result.getPixel(x, y);
@@ -50,9 +64,15 @@ class CompositorService {
             (src.b.toDouble() * a + dst.b.toDouble() * inv).round().clamp(0, 255),
             255,
           );
+          blended++;
         }
       }
     }
+    print('[COMP] pixels: copied=\$copied blended=\$blended transparent=\$transparent');
+    // Diagnostic 3: sample result pixel at backdrop area (top-left corner = should be backdrop)
+    final corner = result.getPixel(10, 10);
+    print('[COMP] result top-left pixel: r=\${corner.r.toInt()} g=\${corner.g.toInt()} '
+        'b=\${corner.b.toInt()} a=\${corner.a.toInt()}');
 
     return Uint8List.fromList(img.encodePng(result));
   }

@@ -43,19 +43,45 @@ class SegmentationService {
 
       // Resize original to mask dimensions for pixel-perfect mapping
       final resized = img.copyResize(original, width: maskWidth, height: maskHeight);
-      final output = img.Image.from(resized);
+
+      // IMPORTANT: must explicitly create an RGBA image (numChannels: 4).
+      // JPEG sources decode as RGB (numChannels: 3). Using img.Image.from(resized)
+      // inherits that 3-channel format, causing setPixelRgba to silently discard
+      // the alpha value — every pixel stays fully opaque and the cutout has no
+      // real transparency.
+      final output = img.Image(width: resized.width, height: resized.height, numChannels: 4);
+      // Copy source pixels as fully opaque
+      for (var y = 0; y < resized.height; y++) {
+        for (var x = 0; x < resized.width; x++) {
+          final p = resized.getPixel(x, y);
+          output.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), 255);
+        }
+      }
 
       // Apply mask: set alpha to 0 where confidence < threshold (0.5)
       const threshold = 0.5;
+      int transparentCount = 0;
+      int opaqueCount = 0;
       for (var y = 0; y < output.height; y++) {
         for (var x = 0; x < output.width; x++) {
           final maskIndex = y * maskWidth + x;
           final confidence = confidenceMask[maskIndex];
           if (confidence < threshold) {
             output.setPixelRgba(x, y, 0, 0, 0, 0); // Fully transparent
+            transparentCount++;
+          } else {
+            opaqueCount++;
           }
         }
       }
+      print('[SEG] output format: numChannels=\${output.numChannels} '
+          'size=\${output.width}x\${output.height} '
+          'transparent=\$transparentCount opaque=\$opaqueCount');
+      // Sample centre pixel alpha to confirm alpha channel is live
+      final cx = output.width ~/ 2, cy = output.height ~/ 2;
+      final cp = output.getPixel(cx, cy);
+      print('[SEG] centre pixel: r=\${cp.r.toInt()} g=\${cp.g.toInt()} '
+          'b=\${cp.b.toInt()} a=\${cp.a.toInt()}');
 
       // Encode as PNG (supports transparency)
       return Uint8List.fromList(img.encodePng(output));
