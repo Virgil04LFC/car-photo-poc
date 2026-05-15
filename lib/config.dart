@@ -63,6 +63,16 @@ const List<BackgroundOption> kBackgrounds = [
     name: 'Open Sky',
     color: Color(0xFF87CEEB),
   ),
+  BackgroundOption(
+    id: 'industrial-garage',
+    name: 'Industrial Garage',
+    color: Color(0xFF7A7568),
+  ),
+  BackgroundOption(
+    id: 'white-studio',
+    name: 'White Studio',
+    color: Color(0xFFF5F5F5),
+  ),
 ];
 
 // ─── Model ────────────────────────────────────────────────────────────────────
