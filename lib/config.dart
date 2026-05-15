@@ -64,19 +64,9 @@ const List<BackgroundOption> kBackgrounds = [
     color: Color(0xFF87CEEB),
   ),
   BackgroundOption(
-    id: 'industrial-garage',
-    name: 'Industrial Garage',
-    color: Color(0xFF7A7568),
-  ),
-  BackgroundOption(
-    id: 'white-studio',
-    name: 'White Studio',
-    color: Color(0xFFF5F5F5),
-  ),
-  BackgroundOption(
-    id: 'turntable-test',
-    name: 'Turntable (Test)',
-    color: Color(0xFF2C3035),
+    id: 'concrete-warm',
+    name: 'Concrete Warm',
+    color: Color(0xFFC8B99A),
   ),
 ];
 
