@@ -73,6 +73,11 @@ const List<BackgroundOption> kBackgrounds = [
     name: 'White Studio',
     color: Color(0xFFF5F5F5),
   ),
+  BackgroundOption(
+    id: 'turntable-test',
+    name: 'Turntable (Test)',
+    color: Color(0xFF2C3035),
+  ),
 ];
 
 // ─── Model ────────────────────────────────────────────────────────────────────
